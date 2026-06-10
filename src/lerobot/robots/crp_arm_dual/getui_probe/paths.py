@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,19 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+"""Paths for the native ``crp_getui_probe`` binary (lives next to this file)."""
 
-from ..config import TeleoperatorConfig
-from ..so_leader import SOLeaderConfig
+from __future__ import annotations
 
+from pathlib import Path
 
-@TeleoperatorConfig.register_subclass("bi_so_leader")
-@dataclass(kw_only=True)
-class BiSOLeaderConfig(TeleoperatorConfig):
-    """Configuration class for Bi SO Leader teleoperators."""
-
-    left_arm_config: SOLeaderConfig
-    right_arm_config: SOLeaderConfig
-    # Per-arm calibration ids (same as legacy ``bi_so101_leader`` → ``1.json`` / ``2.json``).
-    left_leader_id: str = "1"
-    right_leader_id: str = "2"
+GETUI_PROBE_DIR = Path(__file__).resolve().parent
+DEFAULT_GETUI_PROBE_BINARY = GETUI_PROBE_DIR / "crp_getui_probe"
+BUILD_SCRIPT = GETUI_PROBE_DIR / "build.sh"

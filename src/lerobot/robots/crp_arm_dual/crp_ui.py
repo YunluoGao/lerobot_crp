@@ -14,19 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+"""CRP teach-pendant UI register indices used from Python (GP teleop / gripper)."""
 
-from ..config import TeleoperatorConfig
-from ..so_leader import SOLeaderConfig
-
-
-@TeleoperatorConfig.register_subclass("bi_so_leader")
-@dataclass(kw_only=True)
-class BiSOLeaderConfig(TeleoperatorConfig):
-    """Configuration class for Bi SO Leader teleoperators."""
-
-    left_arm_config: SOLeaderConfig
-    right_arm_config: SOLeaderConfig
-    # Per-arm calibration ids (same as legacy ``bi_so101_leader`` → ``1.json`` / ``2.json``).
-    left_leader_id: str = "1"
-    right_leader_id: str = "2"
+GRIPPER_UI_OPEN = 50
+GRIPPER_UI_SPEED = 51
+GRIPPER_UI_TORQUE = 52
+GRIPPER_UI_ACC = 53
+GRIPPER_UI_DCC = 54
+GRIPPER_UI_TRIGGER = 55
+# UI56–58: teach-pendant gripper feedback (read via getui_probe subprocess only).
+GRIPPER_UI_POSITION = 56
+GRIPPER_UI_SPEED_OUT = 57
+GRIPPER_UI_TORQUE_OUT = 58

@@ -35,6 +35,8 @@ from lerobot.configs import VideoEncoderConfig, camera_encoder_defaults
 
 from .compute_stats import compute_episode_stats
 from .dataset_metadata import LeRobotDatasetMetadata
+from lerobot.utils.utils import SuppressProgressBars
+
 from .feature_utils import (
     get_hf_features_from_features,
     validate_episode_buffer,
@@ -57,6 +59,7 @@ from .video_utils import (
     concatenate_video_files,
     encode_video_frames,
     get_video_duration_in_s,
+    suppress_ffmpeg_stderr,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,18 +72,22 @@ def _encode_video_worker(
     fps: int,
     camera_encoder: VideoEncoderConfig | None = None,
     encoder_threads: int | None = None,
+    *,
+    suppress_stderr: bool = True,
 ) -> Path:
     temp_path = Path(tempfile.mkdtemp(dir=root)) / f"{video_key}_{episode_index:03d}.mp4"
     fpath = DEFAULT_IMAGE_PATH.format(image_key=video_key, episode_index=episode_index, frame_index=0)
     img_dir = (root / fpath).parent
-    encode_video_frames(
-        img_dir,
-        temp_path,
-        fps,
-        camera_encoder=camera_encoder,
-        encoder_threads=encoder_threads,
-        overwrite=True,
-    )
+    ctx = suppress_ffmpeg_stderr if suppress_stderr else contextlib.nullcontext
+    with ctx():
+        encode_video_frames(
+            img_dir,
+            temp_path,
+            fps,
+            camera_encoder=camera_encoder,
+            encoder_threads=encoder_threads,
+            overwrite=True,
+        )
     shutil.rmtree(img_dir)
     return temp_path
 
@@ -291,39 +298,41 @@ class DatasetWriter:
                 ep_metadata.update(self._save_episode_video(video_key, episode_index, temp_path=temp_path))
         elif has_video_keys and not use_batched_encoding:
             num_cameras = len(self._meta.video_keys)
-            if parallel_encoding and num_cameras > 1:
-                with concurrent.futures.ProcessPoolExecutor(max_workers=num_cameras) as executor:
-                    future_to_key = {
-                        executor.submit(
-                            _encode_video_worker,
-                            video_key,
-                            episode_index,
-                            self._root,
-                            self._meta.fps,
-                            self._camera_encoder,
-                            self._encoder_threads,
-                        ): video_key
-                        for video_key in self._meta.video_keys
-                    }
+            logger.info("Encoding episode videos (%d camera(s))...", num_cameras)
+            with suppress_ffmpeg_stderr():
+                if parallel_encoding and num_cameras > 1:
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=num_cameras) as executor:
+                        future_to_key = {
+                            executor.submit(
+                                _encode_video_worker,
+                                video_key,
+                                episode_index,
+                                self._root,
+                                self._meta.fps,
+                                self._camera_encoder,
+                                self._encoder_threads,
+                            ): video_key
+                            for video_key in self._meta.video_keys
+                        }
 
-                    results = {}
-                    for future in concurrent.futures.as_completed(future_to_key):
-                        video_key = future_to_key[future]
-                        try:
-                            temp_path = future.result()
-                            results[video_key] = temp_path
-                        except Exception as exc:
-                            logger.error(f"Video encoding failed for {video_key}: {exc}")
-                            raise exc
+                        results = {}
+                        for future in concurrent.futures.as_completed(future_to_key):
+                            video_key = future_to_key[future]
+                            try:
+                                temp_path = future.result()
+                                results[video_key] = temp_path
+                            except Exception as exc:
+                                logger.error(f"Video encoding failed for {video_key}: {exc}")
+                                raise exc
 
-                for video_key in self._meta.video_keys:
-                    temp_path = results[video_key]
-                    ep_metadata.update(
-                        self._save_episode_video(video_key, episode_index, temp_path=temp_path)
-                    )
-            else:
-                for video_key in self._meta.video_keys:
-                    ep_metadata.update(self._save_episode_video(video_key, episode_index))
+                    for video_key in self._meta.video_keys:
+                        temp_path = results[video_key]
+                        ep_metadata.update(
+                            self._save_episode_video(video_key, episode_index, temp_path=temp_path)
+                        )
+                else:
+                    for video_key in self._meta.video_keys:
+                        ep_metadata.update(self._save_episode_video(video_key, episode_index))
 
         # `meta.save_episode` need to be executed after encoding the videos
         self._meta.save_episode(episode_index, episode_length, episode_tasks, ep_stats, ep_metadata)
@@ -390,7 +399,8 @@ class DatasetWriter:
         hf_features = get_hf_features_from_features(self._meta.features)
         ep_dict = {key: episode_buffer[key] for key in hf_features}
         ep_dataset = datasets.Dataset.from_dict(ep_dict, features=hf_features, split="train")
-        ep_dataset = embed_images(ep_dataset)
+        with SuppressProgressBars():
+            ep_dataset = embed_images(ep_dataset)
         ep_num_frames = len(ep_dataset)
 
         if self._latest_episode is None:
@@ -586,6 +596,7 @@ class DatasetWriter:
             self._meta.fps,
             self._camera_encoder,
             self._encoder_threads,
+            suppress_stderr=False,
         )
 
     def close_writer(self) -> None:

@@ -20,6 +20,7 @@ import logging
 import os
 import queue
 import shutil
+import sys
 import tempfile
 import threading
 import warnings
@@ -402,6 +403,36 @@ def decode_video_frames_torchcodec(
     return closest_frames
 
 
+_stderr_suppress_depth = 0
+_stderr_saved_fd: int | None = None
+_devnull_file = None
+
+
+@contextlib.contextmanager
+def suppress_ffmpeg_stderr():
+    """Redirect stderr to /dev/null; ref-counted for multi-camera save (one restore at end)."""
+    global _stderr_suppress_depth, _stderr_saved_fd, _devnull_file
+
+    stderr_fd = sys.stderr.fileno()
+    if _stderr_suppress_depth == 0:
+        _stderr_saved_fd = os.dup(stderr_fd)
+        _devnull_file = open(os.devnull, "w")
+        os.dup2(_devnull_file.fileno(), stderr_fd)
+
+    _stderr_suppress_depth += 1
+    try:
+        yield
+    finally:
+        _stderr_suppress_depth -= 1
+        if _stderr_suppress_depth == 0 and _stderr_saved_fd is not None:
+            sys.stderr.flush()
+            os.dup2(_stderr_saved_fd, stderr_fd)
+            os.close(_stderr_saved_fd)
+            _devnull_file.close()
+            _stderr_saved_fd = None
+            _devnull_file = None
+
+
 def encode_video_frames(
     imgs_dir: Path | str,
     video_path: Path | str,
@@ -409,7 +440,7 @@ def encode_video_frames(
     camera_encoder: VideoEncoderConfig | None = None,
     encoder_threads: int | None = None,
     *,
-    log_level: int | None = av.logging.WARNING,
+    suppress_stderr: bool = False,
     overwrite: bool = False,
 ) -> None:
     """More info on ffmpeg arguments tuning on `benchmark/video/README.md`"""
@@ -440,35 +471,28 @@ def encode_video_frames(
 
     video_options = camera_encoder.get_codec_options(encoder_threads, as_strings=True)
 
-    # Set logging level
-    if log_level is not None:
-        # "While less efficient, it is generally preferable to modify logging with Python's logging"
-        logging.getLogger("libav").setLevel(log_level)
+    ctx = suppress_ffmpeg_stderr if suppress_stderr else contextlib.nullcontext
+    with ctx():
+        # Create and open output file (overwrite by default)
+        with av.open(str(video_path), "w") as output:
+            output_stream = output.add_stream(vcodec, fps, options=video_options)
+            output_stream.pix_fmt = pix_fmt
+            output_stream.width = width
+            output_stream.height = height
 
-    # Create and open output file (overwrite by default)
-    with av.open(str(video_path), "w") as output:
-        output_stream = output.add_stream(vcodec, fps, options=video_options)
-        output_stream.pix_fmt = pix_fmt
-        output_stream.width = width
-        output_stream.height = height
+            # Loop through input frames and encode them
+            for input_data in input_list:
+                with Image.open(input_data) as input_image:
+                    input_image = input_image.convert("RGB")
+                    input_frame = av.VideoFrame.from_image(input_image)
+                    packet = output_stream.encode(input_frame)
+                    if packet:
+                        output.mux(packet)
 
-        # Loop through input frames and encode them
-        for input_data in input_list:
-            with Image.open(input_data) as input_image:
-                input_image = input_image.convert("RGB")
-                input_frame = av.VideoFrame.from_image(input_image)
-                packet = output_stream.encode(input_frame)
-                if packet:
-                    output.mux(packet)
-
-        # Flush the encoder
-        packet = output_stream.encode()
-        if packet:
-            output.mux(packet)
-
-    # Reset logging level
-    if log_level is not None:
-        av.logging.restore_default_callback()
+            # Flush the encoder
+            packet = output_stream.encode()
+            if packet:
+                output.mux(packet)
 
     if not video_path.exists():
         raise OSError(f"Video encoding did not work. File not found: {video_path}.")
@@ -596,6 +620,21 @@ def concatenate_video_files(
     if len(input_video_paths) == 0:
         raise FileNotFoundError("No input video paths provided.")
 
+    _concatenate_video_files_impl(
+        input_video_paths,
+        output_video_path,
+        overwrite=overwrite,
+        compatibility_check=compatibility_check,
+    )
+
+
+def _concatenate_video_files_impl(
+    input_video_paths: list[Path | str],
+    output_video_path: Path,
+    *,
+    overwrite: bool,
+    compatibility_check: bool,
+) -> None:
     # This check may be skipped at recording time as videos are encoded with the same encoder config.
     if compatibility_check:
         reference_video_info = get_video_info(input_video_paths[0])

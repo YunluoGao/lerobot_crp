@@ -14,19 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+"""
+CRP dual-arm robot plugin (``robot.type=crp_arm_dual``).
 
-from ..config import TeleoperatorConfig
-from ..so_leader import SOLeaderConfig
+Imports of ``CRPArmDual`` are lazy; loading triggers ``sdk.ensure_crp_sdk_loaded()``.
+Native getUI helper: ``getui_probe/`` (C++ subprocess).
+"""
+
+from .config_crp_arm_dual import CRPArmDualConfig
+
+__all__ = ["CRPArmDualConfig", "CRPArmDual"]
 
 
-@TeleoperatorConfig.register_subclass("bi_so_leader")
-@dataclass(kw_only=True)
-class BiSOLeaderConfig(TeleoperatorConfig):
-    """Configuration class for Bi SO Leader teleoperators."""
+def __getattr__(name: str):
+    if name == "CRPArmDual":
+        from .crp_arm_dual import CRPArmDual
 
-    left_arm_config: SOLeaderConfig
-    right_arm_config: SOLeaderConfig
-    # Per-arm calibration ids (same as legacy ``bi_so101_leader`` → ``1.json`` / ``2.json``).
-    left_leader_id: str = "1"
-    right_leader_id: str = "2"
+        return CRPArmDual
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
