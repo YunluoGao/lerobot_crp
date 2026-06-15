@@ -35,15 +35,28 @@ sudo chmod 666 /dev/ttyACM*
 lerobot-crp-tele-dual
 
 lerobot-crp-record-dual \
-    --dataset.repo_id=user/20260610_gyl_1 \
+    --dataset.repo_id=user/20260615_gyl_6 \
     --dataset.episode_time_s=300 \
-    --dataset.reset_time_s=5 \
-    --dataset.num_episodes=3 \
+    --dataset.reset_time_s=10 \
+    --dataset.num_episodes=7 \
     --resume=false
 
-lerobot-train 
-    --policy.type=act \
-    --dataset.repo_id=user/20260610_gyl_1 ...
+# 同步显示所有相机视频
+lerobot-dataset-viz \
+    --repo-id user/20260615_gyl_5 \
+    --episode-index 3
+
+lerobot-train \
+  --policy.type=act \
+  --dataset.repo_id=user/20260615_gyl_merged \
+  --output_dir=outputs/train/act_20260615_gyl \
+  --job_name=act_20260615_gyl \
+  --policy.device=cuda \
+  --steps=50000 \
+  --batch_size=4 \
+  --eval.n_episodes=0 \
+  --wandb.enable=false \
+  --policy.push_to_hub=false
 ```
 
 默认值见 [`src/lerobot/scripts/crp_gp/config.py`](src/lerobot/scripts/crp_gp/config.py)。

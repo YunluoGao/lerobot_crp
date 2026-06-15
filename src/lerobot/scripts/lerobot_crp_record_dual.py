@@ -28,8 +28,6 @@ from pprint import pformat
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.common.control_utils import (
-    init_keyboard_listener,
-    is_headless,
     sanity_check_dataset_name,
     sanity_check_dataset_robot_compatibility,
 )
@@ -62,6 +60,7 @@ from lerobot.scripts.crp_gp.record_utils import (
 )
 from lerobot.scripts.crp_gp.record import (
     ignore_signals_during_cleanup,
+    new_episode_events,
     record_loop_crp_dual,
     stdin_episode_hotkeys,
     wait_reset_between_episodes,
@@ -172,7 +171,7 @@ def record_dual_crp(cfg: RecordDualCRPConfig) -> LeRobotDataset:
         joint_names=list(SO101_ARM_MOTOR_NAMES),
     )
     tele_cfg = teleop_cfg_from_record(cfg)
-    listener, events = init_keyboard_listener()
+    events = new_episode_events()
 
     interrupted = False
     recorded_episodes = 0
@@ -214,6 +213,20 @@ def record_dual_crp(cfg: RecordDualCRPConfig) -> LeRobotDataset:
                     events["rerecord_episode"] = False
                     events["exit_early"] = False
                     dataset.clear_episode_buffer()
+                    if not events["stop_recording"]:
+                        log_say("Reset before re-record", cfg.play_sounds)
+                        reset_result = wait_reset_between_episodes(
+                            robot,
+                            reset_time_s=cfg.dataset.reset_time_s,
+                            events=events,
+                            label="Re-record reset",
+                            dataset=dataset,
+                        )
+                        if reset_result.aborted:
+                            logger.error(
+                                "CRP disconnected during re-record reset; stopping session."
+                            )
+                            break
                     continue
 
                 if result.aborted:
@@ -232,14 +245,25 @@ def record_dual_crp(cfg: RecordDualCRPConfig) -> LeRobotDataset:
                 logger.info(
                     "Saving episode (GP idle, CRP servo stays on; encoding may take a while)."
                 )
-                # Sequential video encoding: parallel ffmpeg workers often OOM with 2+ cameras.
-                dataset.save_episode(parallel_encoding=False)
+                events["hotkeys_paused"] = True
+                try:
+                    # Sequential video encoding: parallel ffmpeg workers often OOM with 2+ cameras.
+                    dataset.save_episode(parallel_encoding=False)
+                finally:
+                    events["hotkeys_paused"] = False
                 recorded_episodes += 1
                 logger.info(
-                    "Episode saved (%d/%d). Press Esc to stop all, or continue with next episode.",
+                    "Episode saved (%d/%d). Press q in this terminal to stop all, "
+                    "or continue with next episode.",
                     recorded_episodes,
                     total,
                 )
+
+                if events["stop_recording"]:
+                    logger.info(
+                        "stop_recording was set during save; ending session after episode %d.",
+                        recorded_episodes,
+                    )
 
                 if not events["stop_recording"] and recorded_episodes < total:
                     log_say("Reset the environment", cfg.play_sounds)
@@ -247,6 +271,7 @@ def record_dual_crp(cfg: RecordDualCRPConfig) -> LeRobotDataset:
                         robot,
                         reset_time_s=cfg.dataset.reset_time_s,
                         events=events,
+                        dataset=dataset,
                     )
                     if reset_result.aborted:
                         logger.error(
@@ -274,8 +299,6 @@ def record_dual_crp(cfg: RecordDualCRPConfig) -> LeRobotDataset:
                 logging.warning("GP lock on exit failed: %s", exc)
             robot.disconnect()
             teleop.disconnect()
-        if not is_headless() and listener is not None:
-            listener.stop()
 
     if interrupted:
         log_say("Recording stopped", cfg.play_sounds)

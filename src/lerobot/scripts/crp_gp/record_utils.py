@@ -72,13 +72,22 @@ def resolve_orbbec_top_camera(robot_cfg: CRPArmDualConfig) -> None:
     if not isinstance(top, OpenCVCameraConfig):
         return
 
-    from lerobot.scripts.crp_gp.orbbec_rgb_discovery import apply_orbbec_v4l2_tuning, capture_best_orbbec_rgb
+    from lerobot.scripts.crp_gp.orbbec_rgb_discovery import (
+        apply_orbbec_v4l2_tuning,
+        capture_best_orbbec_rgb,
+        validate_orbbec_v4l2_path,
+    )
 
     configured = str(top.index_or_path)
     if os.environ.get("ORBBEC_AUTO_DISCOVER", "1").lower() in ("0", "false", "no"):
-        if Path(configured).exists():
-            apply_orbbec_v4l2_tuning(configured)
-            logger.info("Orbbec top: auto-discover disabled; using %s", configured)
+        if not Path(configured).exists():
+            raise ConnectionError(
+                f"Orbbec top camera: configured path not found: {configured}. "
+                "Set ORBBEC_PATH or --robot.cameras.top.index_or_path"
+            )
+        apply_orbbec_v4l2_tuning(configured)
+        validate_orbbec_v4l2_path(configured)
+        logger.info("Orbbec top: auto-discover disabled; validated %s", configured)
         return
 
     env_path = os.environ.get("ORBBEC_PATH", "")
@@ -86,15 +95,12 @@ def resolve_orbbec_top_camera(robot_cfg: CRPArmDualConfig) -> None:
     logger.info("Orbbec top: auto-discovering RGB node (prefer=%s)...", prefer)
     best = capture_best_orbbec_rgb(prefer=prefer if Path(prefer).exists() else None)
     if best is None:
-        if Path(configured).exists():
-            logger.warning(
-                "Orbbec auto-discovery found no RGB node; falling back to configured path %s",
-                configured,
-            )
-            apply_orbbec_v4l2_tuning(configured)
-            return
+        from lerobot.scripts.crp_gp.orbbec_rgb_discovery import diagnose_orbbec_top_probe
+
         raise ConnectionError(
-            "Orbbec top camera: no RGB V4L2 node found. Replug USB3 or set ORBBEC_PATH=/dev/videoN"
+            "Orbbec top camera: no valid RGB V4L2 node (all candidates missing, IR, or glitched). "
+            "Replug USB3 or set ORBBEC_PATH=/dev/videoN\n"
+            + diagnose_orbbec_top_probe()
         )
 
     if configured != best.path:
@@ -111,12 +117,6 @@ def resolve_orbbec_top_camera(robot_cfg: CRPArmDualConfig) -> None:
             best.path,
             best.sharpness,
             best.score,
-        )
-    if best.sharpness > 20_000 or best.frame.shape[0] != 480:
-        logger.warning(
-            "Orbbec top node may be IR/wrong stream (shape=%s sharp=%.0f); replug USB",
-            best.frame.shape,
-            best.sharpness,
         )
 
     top.index_or_path = best.path

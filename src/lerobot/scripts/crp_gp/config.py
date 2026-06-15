@@ -59,7 +59,7 @@ def _default_cameras() -> dict[str, CameraConfig]:
             width=640,
             height=480,
             fps=30,
-            fourcc="YUYV",
+            fourcc=None,
             warmup_s=2,
         ),
         "left_wrist": RealSenseCameraConfig(

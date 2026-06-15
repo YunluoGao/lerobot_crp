@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import select
 import signal
 import sys
@@ -45,6 +46,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# CSI/SS3 arrow sequences: \x1b[C, \x1b[ D, \x1b[1;5C, \x1bOC, \x1b[d, etc.
+_CSI_ARROW_RE = re.compile(r"\x1b\[[0-9;]*[ ]*([CDcd])")
+_SS3_ARROW_RE = re.compile(r"\x1bO([CDcd])")
+_ESC_WAIT_S = 0.05
+
+
+def _open_terminal_input():
+    """Return (readable stream, owns_fd) for keyboard input, or (None, False) if unavailable."""
+    try:
+        return open("/dev/tty", "r+b", buffering=0), True  # noqa: SIM115
+    except OSError:
+        if sys.stdin.isatty():
+            return sys.stdin, False
+        return None, False
+
+
+def _read_terminal_char(stream) -> str:
+    chunk = stream.read(1)
+    if isinstance(chunk, bytes):
+        return chunk.decode("latin-1", errors="replace")
+    return chunk
+
+
+def new_episode_events() -> dict:
+    """Fresh event flags for CRP episode / session keyboard control (stdin hotkeys)."""
+    return {
+        "exit_early": False,
+        "rerecord_episode": False,
+        "stop_recording": False,
+        "hotkeys_paused": False,
+    }
+
 
 @dataclass(frozen=True)
 class RecordLoopResult:
@@ -56,94 +89,131 @@ class RecordLoopResult:
 
 @contextmanager
 def stdin_episode_hotkeys(events: dict) -> Iterator[None]:
-    """Terminal fallback when pynput misses arrow keys; focus this shell."""
-    if not sys.stdin.isatty():
+    """Read episode control keys from this terminal (must stay focused)."""
+    tty_in, owns_tty = _open_terminal_input()
+    if tty_in is None:
+        logging.warning(
+            "No interactive terminal (/dev/tty): episode hotkeys disabled. "
+            "Run in a real shell (→ save, ← re-record, q stop session)."
+        )
         yield
         return
 
     stop = threading.Event()
-    old_term = termios.tcgetattr(sys.stdin)
+    old_term = termios.tcgetattr(tty_in)
     pending = ""
 
-    def _drain_stdin() -> str:
+    def _drain_input() -> str:
+        if stop.is_set():
+            return ""
         chunks: list[str] = []
-        while select.select([sys.stdin], [], [], 0)[0]:
-            chunks.append(sys.stdin.read(1))
+        try:
+            while select.select([tty_in], [], [], 0)[0]:
+                chunks.append(_read_terminal_char(tty_in))
+        except (ValueError, OSError):
+            return ""
         return "".join(chunks)
 
-    def _strip_token(token: str) -> None:
-        nonlocal pending
-        while token in pending:
-            idx = pending.index(token)
-            pending = pending[:idx] + pending[idx + len(token) :]
+    def _find_arrow() -> re.Match[str] | None:
+        return _CSI_ARROW_RE.search(pending) or _SS3_ARROW_RE.search(pending)
+
+    def _apply_arrow_final(final: str) -> None:
+        if final in "Cc":
+            logging.info("→ (arrow): end episode, save, next (also skips reset wait)")
+            events["exit_early"] = True
+        elif final in "Dd":
+            logging.info("← (arrow): discard episode buffer, re-record (restarts reset countdown if waiting)")
+            events["rerecord_episode"] = True
+            events["exit_early"] = True
 
     def _consume_pending() -> None:
         nonlocal pending
+        if events.get("hotkeys_paused"):
+            pending = ""
+            return
         while True:
-            progress = False
-            if "\x1b[C" in pending or "\x1bOC" in pending:
-                logging.info("→ : end episode, save, next (also skips reset wait)")
-                events["exit_early"] = True
-                _strip_token("\x1b[C")
-                _strip_token("\x1bOC")
-                progress = True
-            if "\x1b[D" in pending or "\x1bOD" in pending:
-                logging.info("← : discard episode buffer, re-record")
-                events["rerecord_episode"] = True
-                events["exit_early"] = True
-                _strip_token("\x1b[D")
-                _strip_token("\x1bOD")
-                progress = True
-            if pending and pending[0] in ("d", "D"):
-                logging.info("d: end episode, save, next (also skips reset wait)")
-                events["exit_early"] = True
-                pending = pending[1:]
-                progress = True
-            if pending and pending[0] in ("a", "A"):
-                logging.info("a: discard episode buffer, re-record")
-                events["rerecord_episode"] = True
-                events["exit_early"] = True
-                pending = pending[1:]
-                progress = True
-            if progress:
+            match = _find_arrow()
+            if match is not None:
+                _apply_arrow_final(match.group(1))
+                pending = pending[: match.start()] + pending[match.end() :]
                 continue
-
-            # Drop lone ESC prefix bytes from arrow keys; Esc stop uses pynput only.
+            if pending and pending[0] in ("q", "Q"):
+                logging.info("q: stop recording session (skip remaining episodes)")
+                events["stop_recording"] = True
+                events["exit_early"] = True
+                pending = pending[1:]
+                continue
+            # Hold partial ESC sequences; drop other stray bytes only.
             if pending.startswith("\x1b"):
-                if len(pending) >= 3 and pending[1] == "[" and pending[2] in "CD":
-                    pending = pending[3:]
-                    continue
-                if len(pending) >= 3 and pending[1] == "O" and pending[2] in "CD":
-                    pending = pending[3:]
-                    continue
-                if len(pending) < 3:
-                    break
-                pending = pending[1:]
-                continue
+                break
             if pending:
                 pending = pending[1:]
                 continue
             break
 
+    def _wait_for_escape_sequence() -> None:
+        nonlocal pending
+        if not pending.startswith("\x1b"):
+            return
+        deadline = time.perf_counter() + _ESC_WAIT_S
+        while time.perf_counter() < deadline:
+            if stop.is_set():
+                return
+            if _find_arrow() is not None:
+                _consume_pending()
+                return
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            try:
+                more, _, _ = select.select([tty_in], [], [], min(remaining, 0.02))
+            except (ValueError, OSError):
+                return
+            if more:
+                pending += _drain_input()
+                _consume_pending()
+                if not pending.startswith("\x1b"):
+                    return
+        if pending == "\x1b" or (pending.startswith("\x1b") and _find_arrow() is None):
+            logger.debug("Discarding unrecognized stdin escape sequence: %r", pending)
+            pending = ""
+
     def _poll_keys() -> None:
         nonlocal pending
         while not stop.is_set():
-            ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+            try:
+                ready, _, _ = select.select([tty_in], [], [], 0.05)
+            except (ValueError, OSError):
+                break
             if ready:
-                pending += _drain_stdin()
+                pending += _drain_input()
+            if events.get("hotkeys_paused"):
+                pending = ""
+                continue
             _consume_pending()
+            _wait_for_escape_sequence()
 
+    poll_thread: threading.Thread | None = None
     try:
-        tty.setcbreak(sys.stdin.fileno())
+        tty.setcbreak(tty_in.fileno())
+        attr = termios.tcgetattr(tty_in)
+        attr[3] &= ~termios.ECHO
+        termios.tcsetattr(tty_in, termios.TCSADRAIN, attr)
+        termios.tcflush(tty_in, termios.TCIFLUSH)
         logging.info(
-            "Episode keys — click THIS terminal: → or d = save & next; ← or a = re-record; "
-            "Esc = stop (pynput). During reset, → or d skips wait and starts next episode."
+            "Episode keys — keep THIS terminal focused: → = save & next; ← = re-record; q = stop session. "
+            "During reset, ← restarts countdown; → skips wait. Hotkeys are ignored while encoding video."
         )
-        threading.Thread(target=_poll_keys, daemon=True, name="stdin_episode_hotkeys").start()
+        poll_thread = threading.Thread(target=_poll_keys, daemon=True, name="stdin_episode_hotkeys")
+        poll_thread.start()
         yield
     finally:
         stop.set()
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_term)
+        if poll_thread is not None:
+            poll_thread.join(timeout=0.2)
+        termios.tcsetattr(tty_in, termios.TCSADRAIN, old_term)
+        if owns_tty:
+            tty_in.close()
 
 
 @contextmanager
@@ -168,18 +238,22 @@ def wait_reset_between_episodes(
     *,
     reset_time_s: float,
     events: dict,
+    label: str = "Reset",
+    dataset: LeRobotDataset | None = None,
 ) -> ResetWaitResult:
     """Wait between episodes without sending GP; CRP servo stays on.
 
-    Waits up to ``reset_time_s``. ``→`` / ``d`` (``exit_early``) ends the wait immediately
-    so the next episode can realign and record.
+    Waits up to ``reset_time_s``. ``→`` (``exit_early``) ends the wait immediately
+    so the next episode can realign and record. ``←`` during the wait restarts the
+    full countdown (and clears any in-progress episode buffer when ``dataset`` is given).
     """
     if reset_time_s <= 0:
         return ResetWaitResult()
 
     logger.info(
-        "Reset: GP idle for %.0fs (servo on; reposition scene). "
-        "→ or d to start next episode early. Countdown in last 10s.",
+        "%s: GP idle for %.0fs (servo on; reposition scene). "
+        "← restarts countdown; → starts next take early. Countdown in last 10s.",
+        label,
         reset_time_s,
     )
     events["rerecord_episode"] = False
@@ -191,15 +265,28 @@ def wait_reset_between_episodes(
         if not robot.is_connected:
             logger.error("CRP disconnected during reset; stopping session.")
             return ResetWaitResult(aborted=True)
+        if events.get("rerecord_episode"):
+            events["rerecord_episode"] = False
+            events["exit_early"] = False
+            if dataset is not None:
+                dataset.clear_episode_buffer()
+            deadline = time.perf_counter() + float(reset_time_s)
+            last_countdown_logged = None
+            logger.info(
+                "← during %s: buffer cleared, restarting %.0fs countdown.",
+                label.lower(),
+                reset_time_s,
+            )
+            continue
         if events.get("exit_early"):
             events["exit_early"] = False
             events["rerecord_episode"] = False
-            logger.info("→ during reset: starting next episode (will realign).")
+            logger.info("→ during %s: starting next take (will realign).", label.lower())
             break
         remaining = deadline - time.perf_counter()
         secs_left = max(0, int(math.ceil(remaining)))
         if secs_left <= 10 and secs_left != last_countdown_logged:
-            logger.info("Reset: %ds...", secs_left)
+            logger.info("%s: %ds...", label, secs_left)
             last_countdown_logged = secs_left
         precise_sleep(min(0.05, max(remaining, 0.0)))
 

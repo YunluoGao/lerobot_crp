@@ -49,16 +49,62 @@ def find_all_opencv_cameras() -> list[dict[str, Any]]:
     """
     Finds all available OpenCV cameras plugged into the system.
 
+    On Linux with an Orbbec Gemini top camera, prepends the auto-discovered RGB
+    V4L2 node (same logic as ``lerobot-crp-record-dual``) and hides other Orbbec
+    capture aliases to avoid IR/depth false positives.
+
     Returns:
         A list of all available OpenCV cameras with their metadata.
     """
     all_opencv_cameras_info: list[dict[str, Any]] = []
+    orbbec_top: dict[str, Any] | None = None
+    is_orbbec_v4l2_capture_device = lambda _path: False  # noqa: E731
+
     logger.info("Searching for OpenCV cameras...")
     try:
+        from lerobot.scripts.crp_gp.orbbec_rgb_discovery import (
+            diagnose_orbbec_top_probe,
+            is_orbbec_v4l2_capture_device,
+            orbbec_top_opencv_camera_info,
+            orbbec_v4l2_node_is_rgb_candidate,
+        )
+
+        orbbec_top = orbbec_top_opencv_camera_info()
+        if orbbec_top is not None:
+            all_opencv_cameras_info.append(orbbec_top)
+            logger.info(
+                "Orbbec top RGB: %s (sharpness=%.0f score=%d)",
+                orbbec_top["id"],
+                orbbec_top.get("probe_sharpness", 0),
+                orbbec_top.get("probe_score", 0),
+            )
+        elif any(is_orbbec_v4l2_capture_device(str(p)) for p in Path("/dev").glob("video*")):
+            from lerobot.scripts.crp_gp.orbbec_rgb_discovery import diagnose_orbbec_top_probe
+
+            logger.error(
+                "Orbbec detected but no valid top RGB node (IR/glitched/unreadable). "
+                "Replug USB3, run scripts/setup_orbbec_top_v4l2.sh, or set ORBBEC_PATH.\n%s",
+                diagnose_orbbec_top_probe(),
+            )
+    except Exception as e:
+        logger.warning("Orbbec top auto-discovery skipped: %s", e)
+
+    try:
         opencv_cameras = OpenCVCamera.find_cameras()
+        top_id = str(orbbec_top["id"]) if orbbec_top is not None else None
         for cam_info in opencv_cameras:
+            cam_id = str(cam_info.get("id"))
+            if top_id is not None and cam_id == top_id:
+                continue
+            if is_orbbec_v4l2_capture_device(cam_id) and not orbbec_v4l2_node_is_rgb_candidate(cam_id):
+                continue
             all_opencv_cameras_info.append(cam_info)
-        logger.info(f"Found {len(opencv_cameras)} OpenCV cameras.")
+        logger.info(
+            "Found %d OpenCV camera(s) (%d Orbbec top + %d other).",
+            len(all_opencv_cameras_info),
+            1 if orbbec_top else 0,
+            len(all_opencv_cameras_info) - (1 if orbbec_top else 0),
+        )
     except Exception as e:
         logger.error(f"Error finding OpenCV cameras: {e}")
 
@@ -114,6 +160,23 @@ def find_all_orbbec_cameras() -> list[dict[str, Any]]:
     return all_orbbec_cameras_info
 
 
+def find_orbbec_top_v4l2_cameras() -> list[dict[str, Any]]:
+    """Orbbec Gemini top RGB via V4L2 (same path as CRP record), not OrbbecSDK."""
+    from lerobot.scripts.crp_gp.orbbec_rgb_discovery import (
+        diagnose_orbbec_top_probe,
+        orbbec_top_opencv_camera_info,
+    )
+
+    info = orbbec_top_opencv_camera_info()
+    if info is None:
+        logger.error(
+            "Orbbec top RGB (V4L2) not available. Replug USB3 or set ORBBEC_PATH=/dev/videoN\n%s",
+            diagnose_orbbec_top_probe(),
+        )
+        return []
+    return [info]
+
+
 def find_and_print_cameras(
     camera_type_filter: str | None = None,
     *,
@@ -123,7 +186,8 @@ def find_and_print_cameras(
     Finds available cameras based on an optional filter and prints their information.
 
     Args:
-        camera_type_filter: Optional string to filter cameras ("realsense", "opencv", or "orbbec").
+        camera_type_filter: Optional string to filter cameras ("realsense", "opencv", "orbbec", or
+                            "orbbec-top" for Gemini top RGB over V4L2).
                             If None, lists Orbbec + RealSense, and OpenCV only when no Orbbec
                             devices are found (or when ``include_opencv=True``).
         include_opencv: When scanning all camera types, force the OpenCV/V4L2 probe even if
@@ -138,28 +202,34 @@ def find_and_print_cameras(
     if camera_type_filter:
         camera_type_filter = camera_type_filter.lower()
 
-    orbbec_cameras_info: list[dict[str, Any]] = []
-    if camera_type_filter is None or camera_type_filter == "orbbec":
-        orbbec_cameras_info = find_all_orbbec_cameras()
-        all_cameras_info.extend(orbbec_cameras_info)
+    if camera_type_filter == "orbbec-top":
+        all_cameras_info = find_orbbec_top_v4l2_cameras()
+    elif camera_type_filter == "orbbec":
+        all_cameras_info = find_all_orbbec_cameras()
+    else:
+        orbbec_cameras_info: list[dict[str, Any]] = []
+        if camera_type_filter is None:
+            orbbec_cameras_info = find_all_orbbec_cameras()
+            all_cameras_info.extend(orbbec_cameras_info)
 
-    if camera_type_filter is None or camera_type_filter == "realsense":
-        all_cameras_info.extend(find_all_realsense_cameras())
+        if camera_type_filter is None or camera_type_filter == "realsense":
+            all_cameras_info.extend(find_all_realsense_cameras())
 
-    scan_opencv = camera_type_filter == "opencv"
-    if camera_type_filter is None:
-        if include_opencv or not orbbec_cameras_info:
-            scan_opencv = True
-        else:
-            logger.info(
-                "Skipping OpenCV V4L2 scan (%d Orbbec device(s) detected). "
-                "Use `lerobot-find-cameras orbbec` for Orbbec serial numbers, or "
-                "`lerobot-find-cameras --include-opencv` to probe /dev/video* anyway.",
-                len(orbbec_cameras_info),
-            )
+        scan_opencv = camera_type_filter == "opencv"
+        if camera_type_filter is None:
+            if include_opencv or not orbbec_cameras_info:
+                scan_opencv = True
+            else:
+                logger.info(
+                    "Skipping OpenCV V4L2 scan (%d Orbbec device(s) detected). "
+                    "Use `lerobot-find-cameras orbbec-top` for CRP top RGB, "
+                    "`lerobot-find-cameras orbbec` for OrbbecSDK serials, or "
+                    "`lerobot-find-cameras --include-opencv` to probe /dev/video* anyway.",
+                    len(orbbec_cameras_info),
+                )
 
-    if scan_opencv:
-        all_cameras_info.extend(find_all_opencv_cameras())
+        if scan_opencv:
+            all_cameras_info.extend(find_all_opencv_cameras())
 
     if not all_cameras_info:
         if camera_type_filter:
@@ -215,10 +285,18 @@ def create_camera_instance(cam_meta: dict[str, Any]) -> dict[str, Any] | None:
 
     try:
         if cam_type == "OpenCV":
-            cv_config = OpenCVCameraConfig(
-                index_or_path=cam_id,
-                color_mode=ColorMode.RGB,
-            )
+            if cam_meta.get("orbbec_top"):
+                from lerobot.scripts.crp_gp.orbbec_rgb_discovery import opencv_config_for_orbbec_top
+
+                profile = cam_meta.get("default_stream_profile") or {}
+                fourcc_raw = profile.get("fourcc")
+                fourcc = None if fourcc_raw in (None, "auto") else str(fourcc_raw)
+                cv_config = opencv_config_for_orbbec_top(cam_id, fourcc=fourcc)
+            else:
+                cv_config = OpenCVCameraConfig(
+                    index_or_path=cam_id,
+                    color_mode=ColorMode.RGB,
+                )
             instance = OpenCVCamera(cv_config)
         elif cam_type == "RealSense":
             rs_config = RealSenseCameraConfig(
@@ -363,9 +441,10 @@ def main():
         type=str,
         nargs="?",
         default=None,
-        choices=["realsense", "opencv", "orbbec"],
-        help="Specify camera type to capture from (e.g., 'realsense', 'opencv', 'orbbec'). "
-        "Default (omit): Orbbec + RealSense; OpenCV only if no Orbbec devices are found.",
+        choices=["realsense", "opencv", "orbbec", "orbbec-top"],
+        help="Specify camera type to capture from (e.g., 'realsense', 'opencv', 'orbbec', "
+        "'orbbec-top' for CRP Gemini top RGB over V4L2). "
+        "Default (omit): OrbbecSDK + RealSense; OpenCV when safe.",
     )
     parser.add_argument(
         "--include-opencv",
