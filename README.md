@@ -15,7 +15,7 @@
 
 </div>
 
-> **CRP 双 GP 臂（本 fork）** — 遥操作与数据采集见 [`docs/CRP_DUAL_ARM.md`](docs/CRP_DUAL_ARM.md)。CLI：`lerobot-crp-tele-dual`、`lerobot-crp-record-dual`。
+> **CRP 双 GP 臂（本 fork）** — 遥操作、录制、回放、ACT 部署见 [`docs/CRP_DUAL_ARM.md`](docs/CRP_DUAL_ARM.md)。CLI：`lerobot-crp-tele-dual`、`lerobot-crp-record-dual`、`lerobot-crp-replay-dual`、`lerobot-crp-deploy-dual`（需 `pip install -e .`）。
 
 **LeRobot** aims to provide models, datasets, and tools for real-world robotics in PyTorch. The goal is to lower the barrier to entry so that everyone can contribute to and benefit from shared datasets and pretrained models.
 

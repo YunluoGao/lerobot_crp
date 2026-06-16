@@ -9,7 +9,8 @@
 - [遥操作](#遥操作)
 - [数据采集](#数据采集)
 - [训练](#训练)
-- [回放与推理（尚未支持）](#回放与推理尚未支持)
+- [回放与策略部署](#回放与策略部署)
+- [已知限制与排查](#已知限制与排查)
 - [后续待办明细](#后续待办明细)
 
 ---
@@ -55,7 +56,34 @@ lerobot-train \
   --eval.n_episodes=0 \
   --wandb.enable=false \
   --policy.push_to_hub=false
+
+lerobot-crp-replay-dual \
+  --dataset.repo_id=user/20260615_gyl_merged \
+  --dataset.episode=0 \
+  --fps=8 \
+  --max_joint_delta_deg=5 \
+  --speed_ratio=15 \
+  --gp_align_delay_s=5 \
+  --robot.ip1=192.168.0.100 \
+  --robot.ip2=192.168.0.101
+
+# 策略部署（须先 pip install -e . 注册 lerobot-crp-deploy-dual）
+lerobot-crp-deploy-dual \
+  --policy.path=outputs/train/act_20260615_gyl/checkpoints/last/pretrained_model \
+  --policy.n_action_steps=1 \
+  --single_task=assemble \
+  --fps=8 \
+  --duration_s=300 \
+  --max_joint_delta_deg=10 \
+  --speed_ratio=25 \
+  --gp_align_delay_s=5 \
+  --robot.ip1=192.168.0.100 \
+  --robot.ip2=192.168.0.101 \
+  --play_sounds=false
 ```
+
+**CLI 注册：** 修改仓库后执行 `cd ~/lerobot && pip install -e .`，否则用  
+`python -m lerobot.scripts.lerobot_crp_deploy_dual ...` 代替 `lerobot-crp-deploy-dual`。
 
 默认值见 [`src/lerobot/scripts/crp_gp/config.py`](src/lerobot/scripts/crp_gp/config.py)。
 
@@ -99,9 +127,12 @@ lerobot-train \
 |------|------|
 | `src/lerobot/scripts/lerobot_crp_tele_dual.py` | 遥操作 CLI |
 | `src/lerobot/scripts/lerobot_crp_record_dual.py` | 录制 CLI |
+| `src/lerobot/scripts/lerobot_crp_replay_dual.py` | 数据集 GJ 回放 CLI |
+| `src/lerobot/scripts/lerobot_crp_deploy_dual.py` | ACT 等策略 GJ 部署 CLI |
+| `src/lerobot/scripts/crp_gp/deploy.py` | 策略加载 + deploy 主循环 |
 | `src/lerobot/scripts/crp_gp/` | GP 环、录制、配置、Orbbec 探测 |
 | `src/lerobot/robots/crp_arm_dual/` | CRP 双臂 Robot + UI 探针 |
-| `third_party/CrpRobotPy/` | 厂商 SDK + `build_patch.sh` |
+| `third_party/CrpRobotPy/` | 厂商 SDK（含 `set_GJs_second`） |
 | `scripts/setup_python_env.sh` | Python 3.12 环境一键安装 |
 
 ---
@@ -134,7 +165,7 @@ bash third_party/CrpRobotPy/build_patch.sh
 
 按顺序做（USB 重插后必重做相机项）：
 
-1. **Python / CLI：** `lerobot-crp-tele-dual --help`、`lerobot-crp-record-dual --help`
+1. **Python / CLI：** `lerobot-crp-tele-dual --help`、`lerobot-crp-record-dual --help`、`lerobot-crp-replay-dual --help`、`lerobot-crp-deploy-dual --help`（若无命令：`pip install -e .`）
 2. **CRP 网络：** `ping -c 2 192.168.0.100` 与 `.101`
 3. **SO101 串口：** `ls -l /dev/ttyACM0 /dev/ttyACM1`；用户在 `dialout` 组；必要时 `sudo chmod 666 /dev/ttyACM*`
 4. **标定：** `ls ~/.cache/huggingface/lerobot/calibration/teleoperators/so101_leader/{1,2}.json`
@@ -223,36 +254,143 @@ lerobot-train \
 
 ---
 
-## 回放与推理（尚未支持）
+## 回放与策略部署
 
-`CRPArmDual.send_action()` 未实现，**勿**对真机运行 `lerobot-replay --robot.type=crp_arm_dual`。
+**勿**对真机使用 `lerobot-deploy --robot.type=crp_arm_dual` 或 `lerobot-replay --robot.type=crp_arm_dual`：通用 deploy 未走 GJ10/GJ20 + ui50 路径。
 
-**当前可用：** 数据集时间轴可视化
+### 真机前流程（replay / deploy 共用）
+
+1. 示教 GJ 程序 **STOP**；先停掉 `lerobot-crp-tele-dual` / `lerobot-crp-record-dual`
+2. 确认 `export ORBBEC_PATH=/dev/videoN`（与录制一致）
+3. 运行 CLI → PC **seed GJ10/GJ20** → **5s 倒计时** 内左右示教器按 **START**（绿灯常亮）
+4. 无图形界面时无法用键盘提前退出，可用 **Ctrl+C**；有 `pynput` 时 **→** 可提前结束 deploy
+
+### GJ 数据集回放
+
+读 dataset 的 14 维 action（12 关节 + 左右 ui50），经 `CrpDualGjExecutor` 写 GJ。**用于验证 GJ/夹爪通路是否与录制一致。**
 
 ```bash
-lerobot-dataset-viz --repo-id user/20260610_gyl_1 --episode-index 0
+lerobot-crp-replay-dual \
+  --dataset.repo_id=user/20260615_gyl_merged \
+  --dataset.episode=0 \
+  --fps=8 \
+  --max_joint_delta_deg=5 \
+  --speed_ratio=15 \
+  --gp_align_delay_s=5 \
+  --robot.ip1=192.168.0.100 \
+  --robot.ip2=192.168.0.101
 ```
 
-**待实现：** dataset action → GP + UI50 → `send_gp_tick`；完成后才可用 `lerobot-rollout` 真机部署。
+| 参数 | 说明 |
+|------|------|
+| `--dataset.repo_id` / `--dataset.episode` | 本地数据集与 episode 索引 |
+| `--dataset.fps` | 回放目标 Hz；省略则用数据集 meta（通常 16） |
+| `--max_joint_delta_deg` | 每 tick 单关节最大变化（°）；`null` 关闭裁剪 |
+| `--speed_ratio` | CRP `set_speed_ratio`；越大 GJ 执行越快 |
+| `--gp_align_delay_s` | 启动前倒计时，留时间按示教 START |
+
+### 策略部署（ACT → 真机）
+
+闭环：**观测（关节 + UI56–58 + 三相机）→ ACT → GJ10/GJ20 + ui50**。与 replay 共用同一执行器，动作来自策略而非数据集。
+
+**Checkpoint 路径** 必须指向 `.../pretrained_model`（含 `config.json`、`train_config.json`、`model.safetensors`），不是 `outputs/train/.../` 根目录。
+
+**首次 smoke（60s、保守）：**
+
+```bash
+lerobot-crp-deploy-dual \
+  --policy.path=outputs/train/act_20260615_gyl/checkpoints/last/pretrained_model \
+  --policy.n_action_steps=1 \
+  --single_task=assemble \
+  --fps=4 \
+  --duration_s=60 \
+  --max_joint_delta_deg=3 \
+  --speed_ratio=10 \
+  --gp_align_delay_s=5 \
+  --robot.ip1=192.168.0.100 \
+  --robot.ip2=192.168.0.101 \
+  --play_sounds=false
+```
+
+**当前推荐（对准/合爪时机，仍须现场确认安全）：**
+
+```bash
+lerobot-crp-deploy-dual \
+  --policy.path=outputs/train/act_20260615_gyl/checkpoints/last/pretrained_model \
+  --policy.n_action_steps=1 \
+  --single_task=assemble \
+  --fps=8 \
+  --duration_s=300 \
+  --max_joint_delta_deg=10 \
+  --speed_ratio=25 \
+  --gp_align_delay_s=5 \
+  --robot.ip1=192.168.0.100 \
+  --robot.ip2=192.168.0.101 \
+  --play_sounds=false
+```
+
+#### Deploy 参数说明
+
+| 参数 | 作用 |
+|------|------|
+| `--policy.path` | ACT checkpoint 目录（`.../pretrained_model`） |
+| `--policy.n_action_steps=1` | **建议 deploy 使用**：每 tick 根据新观测重算一步；默认 100 步队列 + 低 fps 会导致合爪时机严重偏移 |
+| `--single_task` | 与录制 `--dataset.single_task` 一致（默认 `assemble`） |
+| `--fps` | 目标控制频率；实际常低于设定（相机 + GPU 推理耗时）。训练 fps=16，可逐步试 8→12→16 |
+| `--duration_s` | 最长运行秒数；**到点即停，不检测是否抓成功** |
+| `--max_joint_delta_deg` | 每 tick 每关节相对当前角的最大变化（°）；过大动作快但需确认安全；`null` 关闭 |
+| `--speed_ratio` | 示教/GJ 程序执行速度倍率（SDK `set_speed_ratio`） |
+| `--gp_align_delay_s` | 启动倒计时，便于按示教 START |
+| `--robot.ip1` / `--robot.ip2` | 左/右 CRP IP；仅改 IP 时 CLI 会自动恢复默认三相机 |
+| `--play_sounds=false` | 关闭 TTS 提示 |
+
+**Deploy 未写 `--robot.cameras` 时** 默认：`top`（Orbbec）+ 双 RealSense 腕部，须与训练数据集 camera key 一致。
+
+**日志：** 正常循环会出现 `deploy tick=N left Δmax=... right Δmax=... sent_keys=14`；结束时 `Deploy finished: N ticks`。
+
+### 离线可视化
+
+```bash
+lerobot-dataset-viz --repo-id user/20260615_gyl_merged --episode-index 0
+```
+
+---
+
+## 已知限制与排查
+
+| 现象 | 可能原因 | 建议 |
+|------|----------|------|
+| `lerobot-crp-deploy-dual: 未找到命令` | 未 editable 安装 | `pip install -e .` 或 `python -m lerobot.scripts.lerobot_crp_deploy_dual` |
+| GJ init 后立即退出、无 `deploy tick` | 曾误用 `make_default_processors` 解包顺序（已修）；或 `cameras: {}` | 确认 config 里 `cameras` 非空；更新到最新代码 |
+| 能到物体附近但抓不准 | 策略泛化、左臂几乎不动、场景与训练不一致 | 先试 `--policy.n_action_steps=1`；对比 **replay 同 episode** 是否准 |
+| 合爪总是偏早/偏晚 | ACT 默认 `n_action_steps=100` 且 deploy fps ≠ 训练 16fps | deploy 设 `--policy.n_action_steps=1` |
+| 没抓到也继续下一步 | **设计如此**：`duration_s` 开环，无 ui56/力矩成功检测 | 需额外开发抓取成功分支（暂未实现） |
+| 左臂 Δmax≈1°、仅右臂大动 | 策略输出或数据偏置 | 补数据 / 检查示范是否双手配合 |
+| 实际 tick 远低于 `--fps` | 三相机读取 + ACT 推理慢 | 正常；提高 fps 前先确认 GPU 与 USB3 |
+| Headless 无键盘退出 | 缺 `pynput` | `pip install pynput` 或 `Ctrl+C` |
+
+**诊断顺序：** replay 同 episode 能抓 → 策略/时序问题；replay 也不准 → 摆放、夹爪 ui50、示教程序、GJ 通路。
 
 ---
 
 ## 后续待办明细
 
-**阶段 6 — GP 回放：**
+**阶段 6 — GJ 回放：**
 
-- [ ] 实现 `CRPArmDual.send_action()`：关节 + UI50 → GP + `set_ui_*`
-- [ ] 或独立 `lerobot-crp-replay-dual`：读 dataset action → GP tick
-- [ ] 安全：速度限幅、工作空间、急停
+- [x] 独立 `lerobot-crp-replay-dual`：dataset action → GJ10/GJ20 + ui50
+- [x] 安全：`max_joint_delta_deg`、`speed_ratio`
+- [ ] 实现 `CRPArmDual.send_action()`（供通用 `lerobot-replay` 使用，非当前主路径）
 
 **阶段 7 — 策略部署：**
 
-- [ ] Policy 输出 → GP/UI50 桥接（与训练 action schema 一致）
-- [ ] 相机 obs 与训练时 key 对齐（top-only vs 三相机）
-- [ ] `lerobot-rollout` 或专用 rollout CLI
+- [x] `lerobot-crp-deploy-dual`：Policy → GJ/UI50（与训练 action schema 一致）
+- [x] 相机 obs 与训练 key 对齐（top + 双腕）
+- [ ] 抓取成功检测 / 失败重试 / 提前终止
+- [ ] `temporal_ensemble_coeff` 或更高 fps 下的系统调参文档
 
-**阶段 8 — 训练：**
+**阶段 8 — 训练与效果：**
 
-- [ ] `lerobot-train --policy.type=act` 在 top-only 数据集上 smoke
-- [ ] 对比 dataset-viz 与 policy 预测（离线）
+- [x] `lerobot-train --policy.type=act` 在 merged 数据集上 smoke
+- [ ] 离线对比 policy 预测 vs 数据集（公平 eval 需每帧 `policy.reset()`）
 - [ ] 相机数变更时重新采集或 mask 策略
+- [ ] DAgger / 增广数据提升抓取成功率

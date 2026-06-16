@@ -101,6 +101,13 @@ def _default_robot_for_record() -> CRPArmDualConfig:
     )
 
 
+def ensure_crp_dual_default_cameras(robot: CRPArmDualConfig) -> None:
+    """Restore top + wrist cameras when CLI ``--robot.ip*`` rebuilds an empty ``cameras`` dict."""
+    if robot.cameras:
+        return
+    robot.cameras = _default_cameras()
+
+
 @dataclass
 class ArmGPConfig:
     """Per-arm GP / wrist / Z parameters (CLI: ``--left.*`` / ``--right.*``)."""

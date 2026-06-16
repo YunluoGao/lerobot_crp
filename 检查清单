@@ -1,0 +1,289 @@
+# 接口重插检查清单
+
+```
+
+## Assistant
+
+换电脑、重插所有接口后，**代码和默认配置可以不动**，但下面这些**会随机器/插口变化**，必须逐项核对。
+
+---
+
+## 一、物理接线（建议顺序）
+
+| 接口 | 设备 | 注意 |
+|------|------|------|
+| 网线 ×2 | 左 CRP `192.168.0.100`、右 CRP `192.168.0.101` | PC 网口需在 `192.168.0.x` 同网段 |
+| USB | 左 SO101 主臂 | 默认期望 **`/dev/ttyACM1`** |
+| USB | 右 SO101 主臂 | 默认期望 **`/dev/ttyACM0`** |
+| USB3 | Orbbec Gemini 335（顶视） | **`/dev/videoN` 会变**，必须重查 |
+| USB3 ×2 | 左/右腕 RealSense | 按**序列号**识别，插口可换 |
+| （可选） | UI 探针相关 | 与 CRP 网络/SDK 有关，换机后仍要测 |
+
+RealSense 走 **USB3**；顶视 + 双腕尽量分散到不同 USB 控制器，避免带宽争用。
+
+---
+
+## 二、换机一次性准备（仓库已拷过来时）
+
+```bash
+cd ~/lerobot
+conda activate lerobot   # 若无环境：bash scripts/setup_python_env.sh
+
+pip install -e ".[feetech,dataset]"
+pip install 'lerobot[intelrealsense]'
+
+# 串口权限（新用户只需做一次）
+sudo usermod -aG dialout "$USER"
+# 注销/重登后生效；临时可用：
+sudo chmod 666 /dev/ttyACM*
+
+# SDK + 标定（从旧机一并拷贝）
+ls third_party/CrpRobotPy/CrpRobotPy.so third_party/CrpRobotPy/libRobotService.so license.key
+ls ~/.cache/huggingface/lerobot/calibration/teleoperators/so101_leader/{1,2}.json
+
+# UI 探针（若二进制未拷或未编译）
+bash src/lerobot/robots/crp_arm_dual/getui_probe/build.sh
+```
+
+---
+
+## 三、重插后检查清单（按顺序）
+
+### 0. 基础环境
+
+```bash
+cd ~/lerobot && conda activate lerobot
+
+lerobot-crp-tele-dual --help
+lerobot-crp-record-dual --help
+lerobot-crp-replay-dual --help
+lerobot-crp-deploy-dual --help
+# 若 deploy 找不到：pip install -e .
+```
+
+**通过标准：** 四个 CLI 都能 `--help`，无 import 报错。
+
+---
+
+### 1. CRP 以太网
+
+```bash
+# PC 网口 IP（应在 192.168.0.x，且不与 100/101 冲突）
+ip -br addr show
+ip route | grep 192.168.0
+
+ping -c 2 192.168.0.100
+ping -c 2 192.168.0.101
+```
+
+**通过标准：** 双 ping 通。  
+**不通时：** 查网线、示教器上电、PC 静态 IP / 子网掩码 `255.255.255.0`。
+
+---
+
+### 2. SO101 双主臂串口
+
+```bash
+ls -l /dev/ttyACM*
+groups | grep dialout
+
+# 看 USB 对应关系（便于 ACM 编号对调时辨认）
+ls -l /dev/serial/by-id/
+```
+
+**默认映射（代码里写死的）：**
+
+| 臂 | 默认端口 | 标定文件 |
+|----|----------|----------|
+| 左 | `/dev/ttyACM1` | `.../so101_leader/1.json` |
+| 右 | `/dev/ttyACM0` | `.../so101_leader/2.json` |
+
+**通过标准：** 两个 `ttyACM*` 都存在；`dialout` 组已加入（或已 `chmod 666`）。
+
+**ACM 对调时**（只动启动参数，不改代码）：
+
+```bash
+lerobot-crp-tele-dual \
+  --teleop.left_arm_config.port=/dev/ttyACM0 \
+  --teleop.right_arm_config.port=/dev/ttyACM1
+```
+
+**左右是否接反：** 开遥操作后，只动左主臂，看是否只有左 CRP 从臂动；不对就交换 `--teleop.*.port` 或物理 USB。
+
+---
+
+### 3. 标定文件
+
+```bash
+ls -l ~/.cache/huggingface/lerobot/calibration/teleoperators/so101_leader/1.json
+ls -l ~/.cache/huggingface/lerobot/calibration/teleoperators/so101_leader/2.json
+```
+
+**通过标准：** 两个 JSON 存在且来自旧机（换机必拷）。
+
+---
+
+### 4. CrpRobotPy / license
+
+```bash
+ls -l ~/lerobot/third_party/CrpRobotPy/CrpRobotPy.so
+ls -l ~/lerobot/third_party/CrpRobotPy/libRobotService.so
+ls -l ~/lerobot/license.key
+
+uv run python -c "from CrpRobotPy import CrpRobotPy; print('CrpRobotPy OK')"
+```
+
+**通过标准：** import 成功；**不要**用仓库里的 `libRobotService.so` 覆盖厂商库，除非同时换匹配的 `license.key`。
+
+---
+
+### 5. 顶视 Orbbec（重插必重做）
+
+```bash
+lerobot-find-cameras opencv
+# 查看 outputs/captured_images/ 里哪张是真 RGB
+
+# 稳定路径（推荐，换 USB 口也不变号）：
+ls -l /dev/v4l/by-id/*Orbbec* /dev/v4l/by-id/*Gemini* 2>/dev/null || ls /dev/v4l/by-id/
+
+# 设环境变量（写入 ~/.bashrc 或每次开终端 export）
+export ORBBEC_PATH=/dev/videoN        # 或 /dev/v4l/by-id/usb-...-video-index0
+
+# 可选：自动曝光
+ORBBEC_PATH="$ORBBEC_PATH" bash scripts/setup_orbbec_top_v4l2.sh
+
+# 实时预览
+lerobot-camera-stream opencv --camera.index_or_path="$ORBBEC_PATH"
+```
+
+**通过标准：** 预览画面正常、非全黑/花屏；`ORBBEC_PATH` 指向的路径存在。
+
+---
+
+### 6. 腕部 RealSense（序列号一般不变）
+
+```bash
+lerobot-find-cameras realsense
+lerobot-camera-stream realsense
+```
+
+**默认序列号：**
+
+| 相机 | 序列号 |
+|------|--------|
+| 左腕 | `218622273151` |
+| 右腕 | `218622278121` |
+
+**通过标准：** 枚举里能看到上述两个 serial；`lerobot-camera-stream realsense` 双路正常。
+
+序列号不对时（仅 CLI，不改代码）：
+
+```bash
+lerobot-crp-record-dual \
+  --robot.cameras.left_wrist.serial_number_or_name=实际左序列号 \
+  --robot.cameras.right_wrist.serial_number_or_name=实际右序列号 \
+  ...
+```
+
+---
+
+### 7. 全 USB 一览（排查用）
+
+```bash
+lsusb
+ls -l /dev/ttyACM* /dev/video* 2>/dev/null | head -40
+dmesg -T | tail -30   # 需 sudo 时看 USB 是否掉线
+```
+
+---
+
+## 四、功能冒烟（由轻到重）
+
+### A. 仅遥操作（不启相机，最快验 SO101 + CRP）
+
+```bash
+cd ~/lerobot && conda activate lerobot
+sudo chmod 666 /dev/ttyACM*   # 若权限仍有问题
+
+lerobot-crp-tele-dual
+```
+
+**通过标准：** UI 探针 → 伺服上电 → 5s 倒计时 → GP 对齐 → 80Hz 主环；左右主臂分别能带动对应 CRP 从臂。
+
+---
+
+### B. 三相机 + 短录制（验 record/deploy 通路）
+
+```bash
+export ORBBEC_PATH=/dev/videoN   # 第三节已确认
+
+lerobot-crp-record-dual \
+  --dataset.repo_id=user/replug_smoke_1 \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=15 \
+  --dataset.reset_time_s=5 \
+  --resume=false
+```
+
+**通过标准：** 连接三相机无报错；录完可在 `~/.cache/huggingface/lerobot/user/replug_smoke_1/` 看到数据。
+
+---
+
+### C. 回放 / 部署前（真机危险，示教器 GJ 需 STOP）
+
+```bash
+export ORBBEC_PATH=/dev/videoN
+
+# 先 replay 同 episode 验证 GJ 通路（比 deploy 安全）
+lerobot-crp-replay-dual \
+  --dataset.repo_id=user/replug_smoke_1 \
+  --dataset.episode=0 \
+  --fps=8 \
+  --max_joint_delta_deg=5 \
+  --speed_ratio=15 \
+  --gp_align_delay_s=5 \
+  --robot.ip1=192.168.0.100 \
+  --robot.ip2=192.168.0.101
+```
+
+**通过标准：** 5s 内示教器按 START（绿灯）后，有 GJ 下发日志；动作与数据集大致一致。
+
+---
+
+## 五、建议写入 `~/.bashrc` 的变量
+
+```bash
+# 每次重插 Orbbec 后更新这一行
+export ORBBEC_PATH=/dev/videoN    # 或 /dev/v4l/by-id/...
+
+# 若 SO101 口固定对调，可写别名（可选）
+# alias crp-tele='lerobot-crp-tele-dual --teleop.left_arm_config.port=... --teleop.right_arm_config.port=...'
+```
+
+---
+
+## 六、常见问题速查
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| `Permission denied` on `/dev/ttyACM*` | 未进 `dialout` | `usermod -aG dialout` + 重登，或 `chmod 666` |
+| 左臂动、右臂不动（或反了） | ACM0/1 对调 | 交换 `--teleop.*.port` |
+| `Orbbec top camera: path not found` | 未设 `ORBBEC_PATH` | `lerobot-find-cameras opencv` 后 `export` |
+| RealSense 只看到一个 | USB2 /  hub 带宽 | 换 USB3 口、分散控制器 |
+| CRP 连上但 GJ 无反应 | 示教未 START / 程序未 STOP | 停 teleop/record，示教 GJ STOP，replay/deploy 倒计时内 START |
+| `CrpRobotPy` import 失败 | 换机未拷 `.so` / `license.key` | 从旧机拷 `third_party/CrpRobotPy/` 与 `license.key` |
+
+---
+
+## 七、最小通过标准（可打勾）
+
+- [ ] `ping` 通 `.100` / `.101`
+- [ ] 两个 `ttyACM*`，左右映射正确
+- [ ] `1.json` / `2.json` 标定在位
+- [ ] `CrpRobotPy` import OK
+- [ ] `ORBBEC_PATH` 已设且预览正常
+- [ ] 双 RealSense 序列号可见
+- [ ] `lerobot-crp-tele-dual` 遥操作正常
+- [ ] （录/deploy 前）`lerobot-crp-record-dual` 短录 1 集成功
+
+完整说明也在 [`docs/CRP_DUAL_ARM.md`](docs/CRP_DUAL_ARM.md) 的「开录前检查」一节；换机后核心是 **网络 IP、ACM 编号、Orbbec 的 `/dev/videoN`** 三项必重做。
