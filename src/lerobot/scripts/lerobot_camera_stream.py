@@ -22,7 +22,7 @@ Example:
 ```shell
 lerobot-camera-stream
 lerobot-camera-stream opencv
-lerobot-camera-stream orbbec-top
+lerobot-camera-stream opencv --camera-id /dev/video6
 lerobot-camera-stream realsense --display-ip 127.0.0.1 --display-port 9876
 ```
 """
@@ -126,8 +126,8 @@ def main():
         type=str,
         nargs="?",
         default=None,
-        choices=["realsense", "opencv", "orbbec-top"],
-        help="Optional camera type filter. Use 'orbbec-top' for Gemini top RGB (V4L2, same as CRP record). "
+        choices=["realsense", "opencv"],
+        help="Optional camera type filter. Use --camera-id to pick one OpenCV device (e.g. /dev/video6). "
         "Streams all cameras when omitted.",
     )
     parser.add_argument(

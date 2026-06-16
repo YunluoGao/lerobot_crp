@@ -18,10 +18,8 @@ from .mappers.so101_urdf import CrpGPAlignState
 # GP / UI50 teleop loop rate during record (dataset.fps is the write cadence).
 CRP_RECORD_CONTROL_FPS = 80
 
-# Stable camera paths / serials on the lab PC (override via --robot.cameras or env).
-# Gemini 335 exposes many V4L2 nodes (depth/IR/metadata/RGB). /dev/videoN changes after USB replug.
-# Record entry auto-discovers RGB via resolve_orbbec_top_camera(); this is only a fallback prefer hint.
-# Override: ORBBEC_PATH=... ORBBEC_AUTO_DISCOVER=0 to skip auto-discovery.
+# Gemini 335 top camera: set ORBBEC_PATH=/dev/videoN after `lerobot-find-cameras opencv`.
+# /dev/videoN changes after USB replug; default below is only a fallback.
 DEFAULT_ORBBEC_TOP_PATH = "/dev/video6"
 DEFAULT_RS_LEFT_SERIAL = "218622273151"
 DEFAULT_RS_RIGHT_SERIAL = "218622278121"

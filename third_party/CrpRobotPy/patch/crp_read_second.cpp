@@ -4,6 +4,7 @@
 #include <link.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cmath>
 #include <string>
 #include <stdexcept>
@@ -19,16 +20,13 @@ struct SJointPosition {
     int cfg[4];
 };
 
-// IRobotService vtable slots (verified from CrpRobotPy.so read_* disassembly).
-// Second-arm connect uses dlmopen; dlsym(RTLD_DEFAULT) resolves the primary
-// libRobotService and segfaults when called with the second service pointer.
+// IRobotService vtable slots (verified from CrpRobotPy.so disassembly).
 constexpr std::size_t kVtableGetUserPosture = 0x40;
 constexpr std::size_t kVtableGetWorldPosture = 0x48;
 constexpr std::size_t kVtableGetCurrentJoint = 0x1f8;
 
 // CrpRobot::ensureSecondSession (PIE offset in current vendor CrpRobotPy.so).
-// Every native read_*_second / set_GPs_second calls this before touching +0x30.
-constexpr std::size_t kEnsureSecondSessionOffset = 0x14ee0;
+constexpr std::size_t kEnsureSecondSessionOffset = 0x15810;
 
 using GetPostureFn = bool (*)(void *service_this, SRobotPosture *out);
 using EnsureSecondSessionFn = void (*)(void *robot_this);
@@ -193,6 +191,7 @@ std::vector<void *> second_service_candidates(void *robot_this) {
         candidates.push_back(svc);
     };
     append(service_second(robot_this));
+    append(service_second_alt(robot_this));
     if (candidates.empty()) {
         throw std::runtime_error("second IRobotService is null (connect_second first)");
     }
@@ -282,8 +281,11 @@ std::vector<double> read_joints_second_impl(void *robot_this) {
 constexpr int kVarShowUI = 6;
 constexpr std::size_t kCIOServiceRobotSvcOffset = 0x20;
 constexpr const char kIOServiceUuid[] = "EE2C547B-B554-4DD1-B9FE-EE84955EAC60";
+constexpr const char kRobotServiceUuid[] = "A5236E6F-35E4-47C9-BAB1-1FC5E1DAED1B";
 constexpr const char kGetIOServiceSym[] =
     "_ZN3Crp10CSDKLoader10getServiceINS_10IIOServiceEEEPT_PKc";
+constexpr const char kGetRobotServiceSym[] =
+    "_ZN3Crp10CSDKLoader10getServiceINS_13CRobotServiceEEEPT_PKc";
 constexpr const char kSetIntShortSym[] =
     "_ZN3Crp13CRobotService8__setIntIsEEb17EVariableShowTypemPKT_m";
 constexpr const char kGetIntShortSym[] =

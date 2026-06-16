@@ -67,60 +67,28 @@ def prepare_new_dataset_root(cfg: RecordDualCRPConfig) -> None:
 
 
 def resolve_orbbec_top_camera(robot_cfg: CRPArmDualConfig) -> None:
-    """Auto-discover Orbbec RGB V4L2 node and apply format/exposure before ``robot.connect()``."""
+    """Set top camera path from ``ORBBEC_PATH`` or config before ``robot.connect()``."""
     top = robot_cfg.cameras.get("top")
     if not isinstance(top, OpenCVCameraConfig):
         return
 
-    from lerobot.scripts.crp_gp.orbbec_rgb_discovery import (
-        apply_orbbec_v4l2_tuning,
-        capture_best_orbbec_rgb,
-        validate_orbbec_v4l2_path,
-    )
-
+    env_path = os.environ.get("ORBBEC_PATH", "").strip()
     configured = str(top.index_or_path)
-    if os.environ.get("ORBBEC_AUTO_DISCOVER", "1").lower() in ("0", "false", "no"):
-        if not Path(configured).exists():
-            raise ConnectionError(
-                f"Orbbec top camera: configured path not found: {configured}. "
-                "Set ORBBEC_PATH or --robot.cameras.top.index_or_path"
-            )
-        apply_orbbec_v4l2_tuning(configured)
-        validate_orbbec_v4l2_path(configured)
-        logger.info("Orbbec top: auto-discover disabled; validated %s", configured)
-        return
+    path = env_path if env_path else configured
 
-    env_path = os.environ.get("ORBBEC_PATH", "")
-    prefer = env_path if env_path and Path(env_path).exists() else configured
-    logger.info("Orbbec top: auto-discovering RGB node (prefer=%s)...", prefer)
-    best = capture_best_orbbec_rgb(prefer=prefer if Path(prefer).exists() else None)
-    if best is None:
-        from lerobot.scripts.crp_gp.orbbec_rgb_discovery import diagnose_orbbec_top_probe
-
+    if not Path(path).exists():
         raise ConnectionError(
-            "Orbbec top camera: no valid RGB V4L2 node (all candidates missing, IR, or glitched). "
-            "Replug USB3 or set ORBBEC_PATH=/dev/videoN\n"
-            + diagnose_orbbec_top_probe()
+            f"Orbbec top camera: path not found: {path}. "
+            "Run `lerobot-find-cameras opencv`, identify the RGB /dev/videoN from saved images, "
+            "then `export ORBBEC_PATH=/dev/videoN` or pass --robot.cameras.top.index_or_path=..."
         )
 
-    if configured != best.path:
-        logger.info(
-            "Orbbec top: using %s (configured %s, sharpness=%.0f, score=%d)",
-            best.path,
-            configured,
-            best.sharpness,
-            best.score,
-        )
+    if path != configured:
+        logger.info("Orbbec top: using %s (configured %s)", path, configured)
     else:
-        logger.info(
-            "Orbbec top: confirmed %s (sharpness=%.0f, score=%d)",
-            best.path,
-            best.sharpness,
-            best.score,
-        )
+        logger.info("Orbbec top: using %s", path)
 
-    top.index_or_path = best.path
-    apply_orbbec_v4l2_tuning(best.path)
+    top.index_or_path = path
 
 
 def crp_dual_hw_observation_features(robot: CRPArmDual) -> dict[str, type | tuple]:

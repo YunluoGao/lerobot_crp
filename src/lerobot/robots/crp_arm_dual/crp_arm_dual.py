@@ -191,7 +191,75 @@ class CRPArmDual(Robot):
             ) from exc
 
         self.configure()
+        if self.config.init_gj_on_connect:
+            self.seed_gj_registers_from_current_pose()
         logger.info("%s connected.", self)
+
+    def seed_gj_registers_from_current_pose(
+        self, *, seed_left: bool = True, seed_right: bool = True
+    ) -> tuple[bool, bool]:
+        """Write current joint pose into GJ10/GJ20 (5× duplicate rows) for teach-pendant GJ programs."""
+        from lerobot.tools import TrajectoryProcessor
+
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        gs = int(self.config.gj_trajectory_group_size)
+        gj_l = int(self.config.gj_register_left)
+        gj_r = int(self.config.gj_register_right)
+        traj = TrajectoryProcessor(max_points=1, max_joints=gs)
+        crp = self.crp_arm_robot
+
+        ok_l = False
+        ok_r = False
+        with self._sdk_lock:
+            if seed_left:
+                logger.info("%s GJ seed: reading left joints ...", self)
+                left_raw = crp.read_joints()
+                left = [float(left_raw[f"j{i}"]) for i in range(1, 7)]
+                left_mat = traj.init_matrix(left, gs)
+                logger.info("%s GJ seed: set_GJs(GJ%s) left ...", self, gj_l)
+                ok_l = bool(crp.set_GJs(gj_l, left_mat))
+            else:
+                ok_l = True
+
+            if seed_right:
+                try:
+                    logger.info("%s GJ seed: reading right joints ...", self)
+                    right_raw = crp.read_joints_second()
+                    if isinstance(right_raw, list):
+                        right = [float(v) for v in right_raw[:6]]
+                    else:
+                        right = [float(right_raw[f"j{i}"]) for i in range(1, 7)]
+                    right_mat = traj.init_matrix(right, gs)
+                    logger.info("%s GJ seed: set_GJs_second(GJ%s) right ...", self, gj_r)
+                    ok_r = bool(crp.set_GJs_second(gj_r, right_mat))
+                    if hasattr(crp, "is_connected_second") and callable(crp.is_connected_second):
+                        if not crp.is_connected_second():
+                            logger.error(
+                                "%s ip2 session lost after set_GJs_second — do not START teach program",
+                                self,
+                            )
+                            ok_r = False
+                except Exception as exc:
+                    logger.warning(
+                        "%s GJ seed right (GJ%s) failed: %s — stop right teach program and retry",
+                        self,
+                        gj_r,
+                        exc,
+                    )
+            else:
+                ok_r = True
+
+        logger.info(
+            "%s GJ seed on connect: left GJ%s ok=%s | right GJ%s ok=%s",
+            self,
+            gj_l,
+            ok_l,
+            gj_r,
+            ok_r,
+        )
+        return ok_l, ok_r
 
     def ensure_servo_power_on(self) -> None:
         """Enable servo once after deferred connect or steps that drop cabinet enable."""
@@ -313,6 +381,25 @@ class CRPArmDual(Robot):
             logger.debug("%s read %s: %.1fms", self, cam_key, dt_ms)
         return obs_dict
 
+    def set_GJs_first(self, start_index: int, joints_matrix: list[list[float]]) -> bool:
+        with self._sdk_lock:
+            return bool(self.crp_arm_robot.set_GJs(int(start_index), joints_matrix))
+
+    def set_GJs_second(self, start_index: int, joints_matrix: list[list[float]]) -> bool:
+        """Write GJ on ip2 via native ``CrpRobotPy.set_GJs_second``."""
+        fn = getattr(self.crp_arm_robot, "set_GJs_second", None)
+        if fn is None:
+            raise NotImplementedError(
+                "set_GJs_second missing; rebuild CrpRobotPy from ~/python_C++/CrpRobotPy"
+            )
+        with self._sdk_lock:
+            return bool(fn(int(start_index), joints_matrix))
+
+    def movej_first(self, joints: list[float]) -> bool:
+        with self._sdk_lock:
+            self.crp_arm_robot.movej([float(v) for v in joints])
+        return True
+
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError(
             "Use send_GPs_first / send_GPs_second, not movej via send_action."
@@ -346,6 +433,48 @@ class CRPArmDual(Robot):
     def send_GPs_second(self, start_index: int, gp_points: list[list[float]]) -> bool:
         with self._sdk_lock:
             return bool(self.crp_arm_robot.set_GPs_second(start_index, gp_points))
+
+    def send_dual_gp_stream(
+        self,
+        *,
+        left_gp: list[float] | None,
+        right_gp: list[float] | None,
+        gp_index_left: int,
+        gp_index_right: int,
+    ) -> tuple[bool | None, bool | None]:
+        """One GP point per arm per tick (matches ``send_gp_tick`` / teleop loop)."""
+        with self._sdk_lock:
+            crp = self.crp_arm_robot
+            if not crp.is_connected():
+                return None, None
+            if hasattr(crp, "is_connected_second") and callable(crp.is_connected_second):
+                if not crp.is_connected_second():
+                    return None, None
+            ok_left: bool | None = None
+            ok_right: bool | None = None
+            if left_gp is not None:
+                ok_left = bool(crp.set_GPs(int(gp_index_left), [list(left_gp)]))
+            if right_gp is not None:
+                ok_right = bool(crp.set_GPs_second(int(gp_index_right), [list(right_gp)]))
+            return ok_left, ok_right
+
+    def send_dual_gp_init(
+        self,
+        *,
+        left_gp: list[float],
+        right_gp: list[float],
+        gp_index_left: int,
+        gp_index_right: int,
+        point_count: int = 5,
+    ) -> tuple[bool, bool]:
+        """Prime GP buffers with ``point_count`` identical poses (teleop episode start)."""
+        left_pts = [list(left_gp) for _ in range(max(1, int(point_count)))]
+        right_pts = [list(right_gp) for _ in range(max(1, int(point_count)))]
+        with self._sdk_lock:
+            crp = self.crp_arm_robot
+            ok_left = bool(crp.set_GPs(int(gp_index_left), left_pts))
+            ok_right = bool(crp.set_GPs_second(int(gp_index_right), right_pts))
+        return ok_left, ok_right
 
     def send_gp_tick(
         self,

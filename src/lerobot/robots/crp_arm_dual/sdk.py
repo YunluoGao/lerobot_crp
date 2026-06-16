@@ -17,10 +17,10 @@ Load ``third_party/CrpRobotPy`` for dual CRP (``CRPArmDual``).
 
 Prepends the SDK dir to ``LD_LIBRARY_PATH``, optionally fixes ``DT_RUNPATH`` on
 ``CrpRobotPy.so``, and attaches ``CrpRobotPatch.so`` only for legacy vendor builds
-that lack native dual-arm reads.
+that lack native dual-arm reads / UI.
 
-Current build (``~/python_C++/CrpRobotPy``) uses ``dlmopen`` for the second arm and
-exports ``read_*_second`` natively — no patch required for TCP/joint reads.
+Build from ``~/python_C++/CrpRobotPy`` (``set_GJs_second``, ``read_*_second``, etc.)
+and deploy ``CrpRobotPy.so`` to ``third_party/CrpRobotPy/``.
 """
 
 from __future__ import annotations

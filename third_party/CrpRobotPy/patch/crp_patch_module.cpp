@@ -112,5 +112,4 @@ PYBIND11_MODULE(CrpRobotPatch, m) {
         },
         py::arg("robot"),
         py::arg("index"));
-
 }

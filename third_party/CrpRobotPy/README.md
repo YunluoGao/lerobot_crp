@@ -24,8 +24,8 @@ See also `接口参考文件.cpp` for the pybind surface.
 ## Legacy patch (`CrpRobotPatch.so`)
 
 Only needed for **old vendor** `.so` files that expose `connect_second` but lack native
-`read_end_pose_user_second` / `read_joints_second`. Current builds from `python_C++/CrpRobotPy`
-do not need the patch for TCP/joint reads.
+`read_end_pose_user_second` / `read_joints_second` / UI helpers. Current builds from
+`~/python_C++/CrpRobotPy` export dual-arm reads, UI, and ``set_GJs_second`` natively.
 
 ```bash
 bash third_party/CrpRobotPy/build_patch.sh

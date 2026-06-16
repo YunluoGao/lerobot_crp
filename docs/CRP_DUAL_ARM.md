@@ -18,13 +18,6 @@
 
 将 LeRobot 适配到 **卡诺普（CRP）双 GP 从臂 + 双 SO101 主臂** 场景：遥操作、数据集录制、ACT 等策略训练。
 
-| 能力 | CLI | 状态 |
-|------|-----|------|
-| 双主臂 → 双 CRP 遥操作 | `lerobot-crp-tele-dual` | ✅ 真机已验收 |
-| 遥操作 + 数据集录制 | `lerobot-crp-record-dual` | ✅ 代码完成；真机待 USB 稳定验收 |
-| 策略训练 | `lerobot-train` | ✅ 通用（须匹配 dataset schema） |
-| 真机 replay / rollout | `lerobot-replay` / `lerobot-rollout` | ⏳ 需 GP 动作桥接（见下文） |
-
 **常用命令：**
 
 ```bash
@@ -33,6 +26,11 @@ conda activate lerobot
 sudo chmod 666 /dev/ttyACM*
 
 lerobot-crp-tele-dual
+
+# TOP-RGB 检测
+lerobot-find-cameras opencv
+# 在 outputs/captured_images/ 里找到真 RGB 对应的 /dev/videoN
+export ORBBEC_PATH=/dev/videoN
 
 lerobot-crp-record-dual \
     --dataset.repo_id=user/20260615_gyl_6 \
@@ -71,7 +69,7 @@ lerobot-train \
 |----|--------|------|
 | CRP 左 / 右 IP | `192.168.0.100` / `192.168.0.101` | `--robot.ip1` / `--robot.ip2` |
 | SO101 左 / 右串口 | `/dev/ttyACM1` / `/dev/ttyACM0` | 标定 `1.json` / `2.json` |
-| Top 相机 | **启动时自动探测 RGB 节点** | Orbbec Gemini 335；可用 `ORBBEC_PATH` 优先；`ORBBEC_AUTO_DISCOVER=0` 关闭 |
+| Top 相机 | `ORBBEC_PATH` 或 `--robot.cameras.top.index_or_path` | 先用 `lerobot-find-cameras opencv` 确认 RGB 对应的 `/dev/videoN`，再 `export ORBBEC_PATH=...` |
 | 腕部 RealSense | `218622273151` / `218622278121` | **须 USB3**；848×480@30 |
 | 录制相机 | `top` + 双腕 | 640×480 top；`warmup_s=2` |
 | 遥操作相机 | 无 | `--robot.cameras={}` |
@@ -140,9 +138,9 @@ bash third_party/CrpRobotPy/build_patch.sh
 2. **CRP 网络：** `ping -c 2 192.168.0.100` 与 `.101`
 3. **SO101 串口：** `ls -l /dev/ttyACM0 /dev/ttyACM1`；用户在 `dialout` 组；必要时 `sudo chmod 666 /dev/ttyACM*`
 4. **标定：** `ls ~/.cache/huggingface/lerobot/calibration/teleoperators/so101_leader/{1,2}.json`
-5. **SDK 补丁 + UI 探针：** `bash third_party/CrpRobotPy/build_patch.sh`；`bash src/lerobot/robots/crp_arm_dual/getui_probe/build.sh`
+5. **CrpRobotPy + UI 探针：** 从 `~/python_C++/CrpRobotPy` 编译并部署 `CrpRobotPy.so`（含 `set_GJs_second`）；旧 SDK 才需 `bash third_party/CrpRobotPy/build_patch.sh`；`bash src/lerobot/robots/crp_arm_dual/getui_probe/build.sh`
 6. **相机：**
-   - **枚举：** `lerobot-find-cameras realsense` / `lerobot-find-cameras opencv` / `lerobot-find-cameras orbbec`
+   - **枚举：** `lerobot-find-cameras opencv`（含 Orbbec 各 `/dev/video*`）/ `lerobot-find-cameras realsense`
    - **实时预览：** `lerobot-camera-stream realsense` / `lerobot-camera-stream opencv`
 
 ---

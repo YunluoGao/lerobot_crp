@@ -42,6 +42,11 @@ class CRPArmDualConfig(RobotConfig):
     connect_settle_s: float = 0.25  # pause before connect_second (s)
     # When True, ``connect()`` skips ``servo_power_on`` (single enable after UI probe subprocess).
     defer_servo_power_on: bool = False
+    # Seed GJ10/GJ20 with current joints after connect (needed for teach-pendant GJ programs).
+    init_gj_on_connect: bool = True
+    gj_register_left: int = 10
+    gj_register_right: int = 20
+    gj_trajectory_group_size: int = 5
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Retries after transient ``cam.read()`` failures (same idea as ``crp_arm``).
     camera_read_retries: int = 2

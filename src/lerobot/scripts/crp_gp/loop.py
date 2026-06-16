@@ -148,6 +148,60 @@ def _align_arms_at_start(
             )
 
 
+def wait_before_gj_replay(*, delay_s: float) -> None:
+    """Count down before GJ init so both teach pendants can press green START."""
+    if delay_s <= 0:
+        logger.warning(
+            "GJ replay: if green LEDs blink on teach pendants, press green START on "
+            "both arms now (or rerun with --gp_align_delay_s=5)."
+        )
+        return
+    total = int(math.ceil(delay_s))
+    logger.info(
+        "Countdown %ds: press green START on BOTH teach pendants (solid green = running). "
+        "GJ10/GJ20 must already be seeded by PC — if right program errors immediately, "
+        "STOP it and check logs for 'GJ seed ... right GJ20 ok=False'.",
+        total,
+    )
+    deadline = time.perf_counter() + delay_s
+    last_logged: int | None = total
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            break
+        secs = max(0, int(math.ceil(remaining)))
+        if secs != last_logged:
+            logger.info("GJ replay in %ds...", secs)
+            last_logged = secs
+        time.sleep(min(0.2, remaining))
+    logger.info("Countdown done — PC will write new GJ target; keep teach programs RUNNING.")
+
+
+def ensure_gj_replay_ready(robot: CRPArmDual, *, delay_s: float) -> None:
+    """Re-assert servo enable and optional countdown before joint register writes."""
+    robot.ensure_servo_power_on()
+    servo_on = robot.is_servo_on()
+    work_mode: object | None = None
+    crp = robot.crp_arm_robot
+    if hasattr(crp, "get_work_mode"):
+        try:
+            work_mode = crp.get_work_mode()
+        except Exception as exc:
+            logger.warning("get_work_mode failed: %s", exc)
+    logger.info(
+        "GJ prerequisites: servo_on=%s work_mode=%s (need Auto + program running; "
+        "blinking green = not started yet)",
+        servo_on,
+        work_mode,
+    )
+    if not servo_on:
+        logger.warning(
+            "Servo not ON — set_GJs may return ok without motion. "
+            "Enable cabinet servo, then press green START on both teach pendants."
+        )
+    wait_before_gj_replay(delay_s=delay_s)
+
+
 def wait_before_gp_align(*, delay_s: float) -> None:
     """Count down after servo enable before GP align/init (time to press teach-pendant green)."""
     if delay_s <= 0:
@@ -208,7 +262,12 @@ def startup_dual_gp_teleop(
     return arms, (init_gps[0], init_gps[1])
 
 
-def lock_gps_to_current_tcp(robot: CRPArmDual, cfg: TeleoperateDualCRPConfig) -> None:
+def lock_gps_to_current_tcp(
+    robot: CRPArmDual,
+    cfg: TeleoperateDualCRPConfig,
+    *,
+    arms: tuple[str, ...] | None = None,
+) -> None:
     """Write current TCP to GP registers (hold pose; avoids chasing stale targets on servo/exit)."""
     if not robot.is_connected:
         return
@@ -217,6 +276,9 @@ def lock_gps_to_current_tcp(robot: CRPArmDual, cfg: TeleoperateDualCRPConfig) ->
         ("left", cfg.left.gp_index, robot.send_GPs_first, robot.read_end_pose_first),
         ("right", cfg.right.gp_index, robot.send_GPs_second, robot.read_end_pose_second),
     )
+    if arms is not None:
+        allowed = set(arms)
+        specs = tuple(s for s in specs if s[0] in allowed)
     for label, gp_index, send_fn, read_tcp_fn in specs:
         try:
             gp6 = [float(v) for v in read_tcp_fn()]
@@ -240,8 +302,14 @@ def prepare_dual_gp_session(
     robot: CRPArmDual,
     cfg: TeleoperateDualCRPConfig,
     ui_probe: GripperUiProbeManager | None = None,
+    *,
+    lock_gp: bool = True,
 ) -> None:
-    """Once per record/teleop session: UI probe, servo enable, gripper UI setup (no GP align)."""
+    """Once per record/teleop/replay session: UI probe, servo enable, gripper UI setup.
+
+    ``lock_gp=True`` locks GP once at session start (recommended for GJ replay).
+    Pass ``lock_gp=False`` only for experiments.
+    """
     if ui_probe is not None and ui_probe.enabled:
         ui_probe.start_dual(cfg.robot.ip1, cfg.robot.ip2)
         ui_probe.wait_for_subprocess_ready()
@@ -250,7 +318,10 @@ def prepare_dual_gp_session(
         robot.ensure_servo_power_on()
 
     robot.setup_gripper_ui()
-    lock_gps_to_current_tcp(robot, cfg)
+    if lock_gp:
+        lock_gps_to_current_tcp(robot, cfg)
+    else:
+        logger.info("Skipping GP TCP lock at session start (replay will align separately if needed).")
 
 
 def align_dual_gp_for_episode(
